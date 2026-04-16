@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
-import { LogOut, Fingerprint, Plus, Eye, EyeOff, Lock, Unlock } from 'lucide-react';
+import { LogOut, Fingerprint, Plus, Eye, EyeOff, Lock, Unlock, Trash2, Edit2 } from 'lucide-react';
 import FaceScanner from './FaceScanner';
+import CryptoJS from 'crypto-js';
 
 const Dashboard = () => {
   const [credentials, setCredentials] = useState([]);
@@ -10,14 +11,16 @@ const Dashboard = () => {
   const [showScanModal, setShowScanModal] = useState(false);
   const [targetCredId, setTargetCredId] = useState(null);
   
-  // New credential state
+  // Credential state
   const [siteName, setSiteName] = useState('');
   const [siteUrl, setSiteUrl] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [editModeId, setEditModeId] = useState(null);
   
   // UI state
   const [revealedPasswords, setRevealedPasswords] = useState({}); // { id: "actual_password" }
+  const [scanIntent, setScanIntent] = useState(null); // 'REVEAL' or 'DELETE'
   
   const navigate = useNavigate();
 
@@ -33,7 +36,7 @@ const Dashboard = () => {
     }
     
     try {
-      const res = await axios.get('http://127.0.0.1:8000/credentials', {
+      const res = await axios.get(`${import.meta.env.VITE_API_URL}/credentials`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       setCredentials(res.data);
@@ -50,24 +53,70 @@ const Dashboard = () => {
     navigate('/login');
   };
 
+  const generateSecurePassword = () => {
+    const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()_+~`|}{[]:;?><,./-=";
+    let randomPassword = "";
+    for (let i = 0; i < 16; i++) {
+        randomPassword += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    setPassword(randomPassword);
+  };
+
+  const encryptPassword = (rawPassword) => {
+    if (!rawPassword) return rawPassword;
+    return CryptoJS.AES.encrypt(rawPassword, import.meta.env.VITE_VAULT_KEY).toString();
+  };
+
+  const decryptPassword = (cipherText) => {
+    try {
+      const bytes = CryptoJS.AES.decrypt(cipherText, import.meta.env.VITE_VAULT_KEY);
+      const originalText = bytes.toString(CryptoJS.enc.Utf8);
+      return originalText ? originalText : cipherText;
+    } catch(e) {
+      return cipherText;
+    }
+  };
+
   const handleAddCredential = async (e) => {
     e.preventDefault();
     const token = localStorage.getItem('biometri_token');
     try {
-      await axios.post('http://127.0.0.1:8000/credentials', {
-        site_name: siteName,
-        site_url: siteUrl,
-        username,
-        password
-      }, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
+      if (editModeId) {
+        await axios.put(`${import.meta.env.VITE_API_URL}/credentials/${editModeId}`, {
+          site_name: siteName,
+          site_url: siteUrl,
+          username,
+          password: password ? encryptPassword(password) : null
+        }, { headers: { Authorization: `Bearer ${token}` } });
+      } else {
+        await axios.post(`${import.meta.env.VITE_API_URL}/credentials`, {
+          site_name: siteName,
+          site_url: siteUrl,
+          username,
+          password: encryptPassword(password)
+        }, { headers: { Authorization: `Bearer ${token}` } });
+      }
       setShowAddModal(false);
-      setSiteName(''); setSiteUrl(''); setUsername(''); setPassword('');
+      setSiteName(''); setSiteUrl(''); setUsername(''); setPassword(''); setEditModeId(null);
       fetchCredentials(); // refresh
     } catch (err) {
-      console.error("Failed to add", err);
+      console.error("Failed to add/update", err);
     }
+  };
+
+  const handleEditClick = (cred) => {
+    setEditModeId(cred.id);
+    setSiteName(cred.site_name);
+    setSiteUrl(cred.site_url);
+    setUsername(cred.username);
+    setPassword(''); // leave blank meaning no update unless typed
+    setShowAddModal(true);
+  };
+
+  const handleDeleteClick = (credId) => {
+    setTargetCredId(credId);
+    setScanIntent('DELETE');
+    setShowScanModal(true);
   };
 
   const triggerReveal = (credId) => {
@@ -81,6 +130,7 @@ const Dashboard = () => {
     } else {
       // Show scan modal
       setTargetCredId(credId);
+      setScanIntent('REVEAL');
       setShowScanModal(true);
     }
   };
@@ -89,7 +139,7 @@ const Dashboard = () => {
     // In our simplified flow, we just verify the scan is successful by calling login endpoint.
     // In a real scenario, you'd send the token AND the face embedding to an explicit /verify endpoint.
     try {
-      const response = await axios.post('http://127.0.0.1:8000/login', {
+      const response = await axios.post(`${import.meta.env.VITE_API_URL}/login`, {
         // We need the username. But we don't store username in localStorage currently.
         // Actually, we can get it from decoding the JWT.
         username: JSON.parse(atob(localStorage.getItem('biometri_token').split('.')[1])).sub,
@@ -99,26 +149,37 @@ const Dashboard = () => {
       // Verification successful!
       setShowScanModal(false);
       
-      // Reveal the password
-      const cred = credentials.find(c => c.id === targetCredId);
-      if (cred) {
-        setRevealedPasswords(prev => ({ ...prev, [targetCredId]: cred.password }));
+      if (scanIntent === 'DELETE') {
+        const token = localStorage.getItem('biometri_token');
+        await axios.delete(`${import.meta.env.VITE_API_URL}/credentials/${targetCredId}`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        fetchCredentials();
+      } else if (scanIntent === 'REVEAL') {
+        // Reveal the password
+        const cred = credentials.find(c => c.id === targetCredId);
+        if (cred) {
+          setRevealedPasswords(prev => ({ ...prev, [targetCredId]: decryptPassword(cred.password) }));
+        }
+        
+        // Auto-hide after 15 seconds for security
+        setTimeout(() => {
+          setRevealedPasswords(prev => {
+            const copy = { ...prev };
+            delete copy[targetCredId];
+            return copy;
+          });
+        }, 15000);
       }
       
-      // Auto-hide after 15 seconds for security
-      setTimeout(() => {
-        setRevealedPasswords(prev => {
-          const copy = { ...prev };
-          delete copy[targetCredId];
-          return copy;
-        });
-      }, 15000);
+      setScanIntent(null);
 
     } catch (err) {
       console.error("Verification failed");
       // FaceScanner handles its own error UI implicitly or we can show an alert
       alert("Biometric verification failed. Access Denied.");
       setShowScanModal(false);
+      setScanIntent(null);
     }
   };
 
@@ -136,7 +197,11 @@ const Dashboard = () => {
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem' }}>
         <h2><span className="mono" style={{ color: 'var(--primary)' }}>//</span> SECURED CREDENTIALS</h2>
-        <button onClick={() => setShowAddModal(true)} className="btn" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+        <button onClick={() => {
+          setEditModeId(null);
+          setSiteName(''); setSiteUrl(''); setUsername(''); setPassword('');
+          setShowAddModal(true);
+        }} className="btn" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
           <Plus size={16} /> ADD ENTRY
         </button>
       </div>
@@ -167,8 +232,25 @@ const Dashboard = () => {
                   </div>
 
                   <button 
+                    onClick={() => handleEditClick(cred)}
+                    className="btn" 
+                    title="Edit Credential"
+                    style={{ padding: '0.5rem', borderColor: 'var(--text-muted)', color: 'var(--text-muted)' }}>
+                    <Edit2 size={18} />
+                  </button>
+
+                  <button 
+                    onClick={() => handleDeleteClick(cred.id)}
+                    className="btn btn-danger" 
+                    title="Delete Credential"
+                    style={{ padding: '0.5rem' }}>
+                    <Trash2 size={18} />
+                  </button>
+
+                  <button 
                     onClick={() => triggerReveal(cred.id)}
                     className="btn" 
+                    title={isRevealed ? "Hide Password" : "Show Password"}
                     style={{ padding: '0.5rem', borderColor: isRevealed ? 'var(--secondary)' : 'var(--primary)', color: isRevealed ? 'var(--secondary)' : 'var(--primary)' }}>
                     {isRevealed ? <EyeOff size={18} /> : <Eye size={18} />}
                   </button>
@@ -182,7 +264,9 @@ const Dashboard = () => {
       {showAddModal && (
         <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(10px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 }}>
           <div className="glass-panel" style={{ width: '100%', maxWidth: '500px' }}>
-            <h2 className="glow-text" style={{ marginBottom: '1.5rem' }}>NEW ENCLAVE ENTRY</h2>
+            <h2 className="glow-text" style={{ marginBottom: '1.5rem' }}>
+              {editModeId ? 'EDIT ENCLAVE ENTRY' : 'NEW ENCLAVE ENTRY'}
+            </h2>
             <form onSubmit={handleAddCredential}>
               <div className="input-group">
                 <label>System / Service Name</label>
@@ -197,8 +281,11 @@ const Dashboard = () => {
                 <input required value={username} onChange={e => setUsername(e.target.value)} />
               </div>
               <div className="input-group">
-                <label>Secret Asset / Password</label>
-                <input required type="password" value={password} onChange={e => setPassword(e.target.value)} />
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: '0.5rem' }}>
+                  <label style={{ marginBottom: 0 }}>Secret Asset / Password</label>
+                  <button type="button" onClick={generateSecurePassword} className="btn" style={{ padding: '0.2rem 0.6rem', fontSize: '0.7rem', background: 'transparent', color: 'var(--primary)', borderColor: 'var(--primary)', height: 'auto', border: '1px solid' }}>[ Auto Generate ]</button>
+                </div>
+                <input required={!editModeId} type="text" value={password} onChange={e => setPassword(e.target.value)} placeholder={editModeId ? 'Leave blank to keep unchanged' : ''} />
               </div>
               <div style={{ display: 'flex', gap: '1rem', marginTop: '2rem' }}>
                 <button type="button" onClick={() => setShowAddModal(false)} className="btn btn-danger" style={{ flex: 1 }}>CANCEL</button>
@@ -213,11 +300,13 @@ const Dashboard = () => {
         <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.9)', backdropFilter: 'blur(15px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
           <div className="glass-panel" style={{ width: '100%', maxWidth: '500px', textAlign: 'center' }}>
             <h2 className="glow-text" style={{ marginBottom: '0.5rem', color: 'var(--primary)' }}>AUTH REQUIRED</h2>
-            <p className="mono" style={{ marginBottom: '2rem', color: 'var(--text-muted)' }}>BIOMETRIC VERIFICATION FOR DECRYPTION</p>
+            <p className="mono" style={{ marginBottom: '2rem', color: 'var(--text-muted)' }}>
+              {scanIntent === 'DELETE' ? 'BIOMETRIC VERIFICATION FOR DELETION' : 'BIOMETRIC VERIFICATION FOR DECRYPTION'}
+            </p>
             
-            <FaceScanner onScanSuccess={handleScanSuccess} label="Verifying clearance level..." />
+            <FaceScanner onScanSuccess={handleScanSuccess} label={scanIntent === 'DELETE' ? "Verifying clearance to delete..." : "Verifying clearance level..."} />
             
-            <button onClick={() => setShowScanModal(false)} className="btn btn-danger" style={{ marginTop: '2rem' }}>
+            <button onClick={() => { setShowScanModal(false); setScanIntent(null); }} className="btn btn-danger" style={{ marginTop: '2rem' }}>
               ABORT OPERATION
             </button>
           </div>

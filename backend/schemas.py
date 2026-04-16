@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 
 class UserCreate(BaseModel):
     username: str
@@ -14,6 +14,12 @@ class CredentialCreate(BaseModel):
     site_url: str
     username: str
     password: str
+
+class CredentialUpdate(BaseModel):
+    site_name: Optional[str] = None
+    site_url: Optional[str] = None
+    username: Optional[str] = None
+    password: Optional[str] = None
 
 class CredentialResponse(BaseModel):
     id: int

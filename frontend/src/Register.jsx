@@ -23,7 +23,7 @@ const Register = () => {
 
   const handleFaceScan = async (descriptorArray) => {
     try {
-      const response = await axios.post('http://127.0.0.1:8000/register', {
+      const response = await axios.post(`${import.meta.env.VITE_API_URL}/register`, {
         username: username,
         face_embedding: descriptorArray
       });

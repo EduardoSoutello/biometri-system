@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  backend:
+    build: ./backend
+    container_name: biometri-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/biometri.db:/app/biometri.db
+    environment:
+      # These should match your .env equivalents
+      - SECRET_KEY=PROD_SECRET_KEY_CHANGE_ME
+      - ENCRYPTION_KEY=NOT_USED_IN_DB_ANYMORE_BUT_VARS_EXIST
+
+  frontend:
+    build: ./frontend
+    container_name: biometri-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend

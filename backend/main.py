@@ -86,7 +86,7 @@ def login(login_data: schemas.FaceLogin, db: Session = Depends(get_db)):
 
 @app.post("/credentials", response_model=schemas.CredentialResponse)
 def add_credential(cred_in: schemas.CredentialCreate, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
-    encrypted_pw = auth.encrypt_password(cred_in.password)
+    encrypted_pw = cred_in.password
     
     new_cred = models.Credential(
         site_name=cred_in.site_name,
@@ -117,7 +117,43 @@ def get_credentials(db: Session = Depends(get_db), current_user: models.User = D
             "site_name": c.site_name,
             "site_url": c.site_url,
             "username": c.username,
-            "password": auth.decrypt_password(c.encrypted_password)
+            "password": c.encrypted_password
         }
         results.append(schemas.CredentialResponse(**c_dict))
     return results
+
+@app.delete("/credentials/{cred_id}")
+def delete_credential(cred_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    cred = db.query(models.Credential).filter(models.Credential.id == cred_id, models.Credential.owner_id == current_user.id).first()
+    if not cred:
+        raise HTTPException(status_code=404, detail="Credential not found")
+    
+    db.delete(cred)
+    db.commit()
+    return {"detail": "Credential deleted successfully"}
+
+@app.put("/credentials/{cred_id}", response_model=schemas.CredentialResponse)
+def update_credential(cred_id: int, cred_update: schemas.CredentialUpdate, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+    cred = db.query(models.Credential).filter(models.Credential.id == cred_id, models.Credential.owner_id == current_user.id).first()
+    if not cred:
+        raise HTTPException(status_code=404, detail="Credential not found")
+    
+    if cred_update.site_name is not None:
+        cred.site_name = cred_update.site_name
+    if cred_update.site_url is not None:
+        cred.site_url = cred_update.site_url
+    if cred_update.username is not None:
+        cred.username = cred_update.username
+    if cred_update.password is not None:
+        cred.encrypted_password = cred_update.password
+        
+    db.commit()
+    db.refresh(cred)
+    
+    return schemas.CredentialResponse(
+        id=cred.id,
+        site_name=cred.site_name,
+        site_url=cred.site_url,
+        username=cred.username,
+        password=cred_update.password if cred_update.password else cred.encrypted_password
+    )
